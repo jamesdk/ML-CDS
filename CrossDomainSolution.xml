@@ -1,0 +1,181 @@
+<export><workspace name="CrossDomainSolution"><query name="load sample data" focus="false" active="true" mode="xquery">xquery version "1.0-ml";
+declare namespace cds = "http://marklogic.com/mlcs/cds";
+
+let $collections := ("person", "vehicle", "email-address")
+let $collection-sizes := (2, 3, 4)
+
+for $coll at $pos in $collections
+let $coll-size := $collection-sizes[$pos]
+  for $i in (1 to $coll-size)
+  let $uri := fn:concat("/data/", $coll, "-", $i, ".xml")
+  
+  let $now := (fn:current-dateTime(), xs:dateTime("2017-07-19T20:35:10-04:00"))[2]
+  let $formatted-date := fn:format-dateTime($now, "[Y0001][M01][D01][H01][m01][s01]","en","AD","US")
+  let $uniqueId := fn:concat($coll, "-", $formatted-date, "-", $i)
+  
+let $data-document := 
+    element cds:DataEnvelope
+     {
+       element cds:UniqueIdentifier { $uniqueId },
+       element cds:DomainCollection { $coll },
+       element cds:SystemTimeStamp { $now }, 
+       element cds:Data { 
+         element { $coll } { 
+           element SampleData { "blah" }
+        }
+      }
+    }
+  
+return (
+  $data-document,
+  xdmp:document-insert(
+           $uri,
+           $data-document,
+           (),
+           $coll)
+ )</query><query name="load Status docs" focus="false" active="true" mode="xquery">declare namespace cds = "http://marklogic.com/mlcs/cds";
+
+(: in prod, $now would be current date time, but for testing it can be useful to test :)
+declare variable $now := (fn:current-dateTime(), xs:dateTime("2017-07-31T06:45:00-04:00"))[1];
+declare variable $formatted-date := fn:format-dateTime($now, "[Y0001][M01][D01][H01][m01][s01]","en","AD","US");
+declare variable $collections := ("person", "vehicle", "email-address");
+  
+declare function local:buildStatusEnvelope($files as xs:string*) {
+
+  let $metadata-document := 
+    element { 'cds:StatusEnvelope' }
+     {
+       element cds:SystemTimeStamp { $now },
+       element cds:TotalCount { xdmp:estimate(cts:search(fn:doc(), cts:directory-query("/data/"))) },
+       for $coll at $pos in $collections
+       let $coll-count := xdmp:estimate(cts:search(fn:doc(), cts:collection-query($coll)))
+       return element cds:DomainCollection { attribute count { $coll-count },  $coll },
+       if($files) then
+         element { 'filesAdded' }
+         {
+           for $file in $files
+           return element {'file'} { $file }
+         }
+       else ()
+    }
+  return $metadata-document
+};
+
+let $file-list := ("/data/email-address-1.xml", "/data/email-address-2.xml", "/data/person-1.xml", "/data/person-2.xml", "/data/vehicle-1.xml")
+let $status-doc := local:buildStatusEnvelope($file-list)
+
+let $formatted-date := fn:format-dateTime($now, "[Y0001][M01][D01][H01][m01][s01]","en","AD","US")
+let $uri := fn:concat("/statusDocs/", $formatted-date, ".xml")
+return (
+ $status-doc,
+ xdmp:document-insert(
+           $uri,
+           $status-doc,
+           (),
+           ("status"))
+)</query><query name="get latest statusDoc" focus="false" active="true" mode="xquery">xquery version "1.0-ml";
+
+declare namespace cds = "http://marklogic.com/mlcs/cds";
+
+let $latest-timestamp := cts:element-values(xs:QName("cds:SystemTimeStamp"), (), ("limit=1","descending"), cts:collection-query("status"))
+let $latest-uri := cts:uris( (), (), cts:element-range-query(xs:QName("cds:SystemTimeStamp"), "=", $latest-timestamp))
+return (
+    $latest-timestamp,
+    $latest-uri,
+    fn:doc($latest-uri)
+)</query><query name="load get-dashboard-count.xqy" focus="false" active="true" mode="xquery">xquery version "1.0-ml";
+ 
+let $module := '
+xquery version "1.0-ml";
+
+declare namespace cds = "http://marklogic.com/mlcs/cds";
+
+declare variable $statusTimeStamp as xs:string external;
+
+declare function local:get-counts-from-latest-status() {
+
+  let $latest-timestamp := 
+    if($statusTimeStamp ne "") then
+      xs:dateTime($statusTimeStamp)
+    else 
+      cts:element-values(xs:QName("cds:SystemTimeStamp"), (), ("limit=1","descending"), cts:collection-query("status"))
+  let $latest-uri := cts:uris( (), (), cts:element-range-query(xs:QName("cds:SystemTimeStamp"), "=", $latest-timestamp))
+  let $statusDoc :=  fn:doc($latest-uri)
+  
+  let $header := fn:string-join( ("Collection Name", "Latest Status Count", "Current Database Count"), ",")
+  let $total-status-count := fn:string($statusDoc//cds:TotalCount)
+  let $total-db-count := fn:string(xdmp:estimate(cts:search(fn:doc(), cts:directory-query("/data/"))))
+  let $totals-row := fn:string-join( ("Total Documents", $total-status-count, $total-db-count), ",")
+  
+  let $domain-rows :=
+      (
+      for $domain-coll in $statusDoc//cds:DomainCollection
+      let $coll-name := fn:string($domain-coll)
+      let $coll-count := fn:string($domain-coll/@count)
+      let $current-db-coll-count := fn:string(xdmp:estimate(cts:search(fn:doc(), cts:collection-query($coll-name))))
+      return fn:string-join( ($coll-name, $coll-count, $current-db-coll-count), ","),
+      
+      let $coll-name := "Files Added"
+      let $imported-file-uris := $statusDoc//filesAdded/file
+      let $coll-count := fn:string(fn:count($imported-file-uris))
+      let $imported-doc-query := cts:document-query($imported-file-uris)
+      let $current-db-coll-count := fn:string(xdmp:estimate(cts:search(fn:doc(), $imported-doc-query) ))
+      return fn:string-join( ($coll-name, $coll-count, $current-db-coll-count), ",")
+      )
+  let $output-xml :=
+    element table { attribute border {"1"} ,
+      for $row in ($header, $totals-row, $domain-rows)
+      let $columns := fn:tokenize($row, ",")
+      return element tr {
+        for $column in $columns
+        return element td { $column }
+      }
+    }
+
+  let $exports := cts:element-values(xs:QName("cds:SystemTimeStamp"), (), ("limit=10","descending"), cts:collection-query("status"))
+  let $output-xml2 :=
+    element table { 
+      for $value in ($exports)
+      let $columns := $value
+      return element tr {
+        for $column in $columns
+        let $link := fn:concat("?statusTimeStamp=", $value)
+        return element td { 
+          element a { attribute href {$link}, $value }
+          }
+      }
+    }
+  
+  return (
+  (:
+      $latest-timestamp,
+      $latest-uri,
+      $statusDoc,
+  :)
+      fn:concat(xdmp:quote($output-xml), "&lt;br/&gt;&lt;br/&gt;Status Timestamps:", xdmp:quote($output-xml2) )
+  )
+};
+
+
+declare function local:get-counts() {
+    let $output := local:get-counts-from-latest-status() 
+    let $value := "&lt;html&gt;&lt;head&gt;&lt;/head&gt;&lt;body&gt;" || $output || "&lt;/body&gt;&lt;/html&gt;"
+    return $value
+};
+
+let $output := local:get-counts()
+return $output
+'
+return xdmp:document-insert("/get-dashboard-counts.xqy", document {$module} )</query><query name="invoke get-dashboard-counts" focus="true" active="true" mode="xquery">xquery version "1.0-ml";
+
+let $use-default := fn:false()
+
+let $defaultViewTimeStamp := ""
+let $testTimeStamp := "2017-07-31T22:38:17.257586"
+
+let $statusTimeStamp := 
+    if($use-default) then
+        $defaultViewTimeStamp
+    else $testTimeStamp
+
+return xdmp:invoke("/get-dashboard-counts.xqy", (xs:QName("statusTimeStamp"), $statusTimeStamp) )</query></workspace></export>
