@@ -16,6 +16,8 @@ Create a WebServlet project in Eclipse
 
 Add DashboardServlet.java to the Java source directory
 
+Add marklogic-xcc-8.0.5.jar to the build path
+
 Add web.xml to the generated "WEB-INF" directory
 
 Configure web.xml to connect to the XDBC server you created
